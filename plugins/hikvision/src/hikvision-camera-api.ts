@@ -503,7 +503,7 @@ export class HikvisionCameraAPI implements HikvisionAPI {
         });
     }
 
-    async getSupplementLight(): Promise<{ json: SupplementLightRoot | any; xml: string }> {
+    async getSupplementLightCapabilities(): Promise<{ json: SupplementLightRoot | any; xml: string }> {
         const response = await this.request({
             method: 'GET',
             url: `http://${this.ip}/ISAPI/Image/channels/1/supplementLight/capabilities`,
@@ -520,84 +520,27 @@ export class HikvisionCameraAPI implements HikvisionAPI {
         return { json, xml };
     }
 
-    async setSupplementLight(params: { on?: boolean, brightness?: number, mode?: 'auto' | 'manual' }): Promise<void> {
-        const { json } = await this.getSupplementLight();
-        const supp: any = json.SupplementLight;
-        if (!supp) {
-            throw new Error("Supplemental light configuration not available.");
-        }
+    async setSupplementLight(params: { on?: boolean }): Promise<void> {
+        let mode = 'close';
 
-        const getCurrentValue = (obj: any) => Array.isArray(obj) ? obj[0] : obj;
-        const setValue = (t: any, k: string, v: string) => {
-            t[k] = Array.isArray(t[k]) ? [v] : v;
-        };
+        if (params.on) {
+            // find available modes
+            const { json: capsJson } = await this.getSupplementLightCapabilities();
+            const caps: any = capsJson.SupplementLight;
+            const optString: string = caps?.supplementLightMode?.opt || '';
+            const opts = optString.split(',').map((s: string) => s.trim()).filter(Boolean);
 
-        const setBrightnessForMode = (level: number, mode: string) => {
-            const v = level.toString();
-            const map: Record<string, Array<{ obj: any; key: string }>> = {
-                colorVuWhiteLight: [
-                    { obj: supp, key: 'whiteLightBrightness' },
-                    { obj: supp.colorVuWhiteLightModeCfg, key: 'whiteLightbrightLimit' }
-                ],
-                irLight: [
-                    { obj: supp, key: 'irLightBrightness' },
-                    { obj: supp.IrLightModeCfg, key: 'irLightbrightLimit' }
-                ],
-                eventIntelligence: [
-                    { obj: supp.EventIntelligenceModeCfg, key: 'whiteLightBrightness' },
-                    { obj: supp.EventIntelligenceModeCfg, key: 'irLightBrightness' }
-                ]
-            };
-            (map[mode] || []).forEach(({ obj, key }) => {
-                if (obj && obj[key] !== undefined) setValue(obj, key, v);
-            });
-        };
-
-        const setModeConfigs = (m: 'auto' | 'manual') => {
-            if (getCurrentValue(supp.supplementLightMode) === 'eventIntelligence' && supp.EventIntelligenceModeCfg) {
-                setValue(supp.EventIntelligenceModeCfg, 'brightnessRegulatMode', m);
-            } else if (supp.mixedLightBrightnessRegulatMode !== undefined) {
-                setValue(supp, 'mixedLightBrightnessRegulatMode', m);
-            } else if (supp.isAutoModeBrightnessCfg !== undefined) {
-                setValue(supp, 'isAutoModeBrightnessCfg', m === 'auto' ? 'true' : 'false');
+            // prefer white light mode, fall back to others
+            const preferred = ['colorVuWhiteLight', 'eventIntelligence', 'irLight'];
+            const selected = preferred.find(m => opts.includes(m));
+            if (!selected) {
+                throw new Error(`Cannot turn on: no supported mode. Available: ${opts.join(', ')}`);
             }
-        };
-
-        if (params.on !== undefined && supp.supplementLightMode) {
-            const opts = supp.supplementLightMode.opt?.split(',').map((s: string) => s.trim()) || [];
-            this.console.log('[API] Available supplemental light modes:', opts);
-            if (params.on) {
-                const preferred = ['colorVuWhiteLight', 'eventIntelligence', 'irLight'];
-                const sel = preferred.find(m => opts.includes(m));
-                if (!sel) {
-                    throw new Error(`Cannot turn on: no supported mode. Available: ${opts.join(', ')}`);
-                }
-                setValue(supp, 'supplementLightMode', sel);
-            } else {
-                setValue(supp, 'supplementLightMode', 'close');
-            }
+            mode = selected;
         }
 
-        if (params.mode) {
-            setModeConfigs(params.mode);
-        }
+        const xml = `<?xml version="1.0" encoding="UTF-8"?><SupplementLight><supplementLightMode>${mode}</supplementLightMode></SupplementLight>`;
 
-        if (params.brightness !== undefined) {
-            const lvl = Math.min(100, Math.max(0, params.brightness));
-            const mode = getCurrentValue(supp.supplementLightMode);
-            if (mode !== 'close') {
-                setBrightnessForMode(lvl, mode);
-            } else {
-                this.console.warn('[API] Brightness change ignored: light is off');
-            }
-        }
-
-        const builder = new xml2js.Builder({
-            headless: true,
-            renderOpts: { pretty: false },
-        });
-        const newXml = builder.buildObject({ SupplementLight: supp });
-        
         await this.request({
             method: 'PUT',
             url: `http://${this.ip}/ISAPI/Image/channels/1/supplementLight`,
@@ -605,7 +548,7 @@ export class HikvisionCameraAPI implements HikvisionAPI {
             headers: {
                 'Content-Type': 'application/xml',
             },
-            body: newXml,
+            body: xml,
         });
     }
 
